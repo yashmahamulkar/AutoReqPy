@@ -1,9 +1,8 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, HttpUrl, validator
+from flask import Flask, request, jsonify
+from pydantic import BaseModel, HttpUrl, ValidationError
 from git import Repo
 import os
 import uuid
-import uvicorn
 import subprocess
 import shutil
 from pathlib import Path
@@ -39,7 +38,7 @@ if not GEMINI_API_KEY:
 else:
     genai.configure(api_key=GEMINI_API_KEY)
 
-app = FastAPI(title="GitHub Repository Cloner")
+app = Flask(__name__)
 
 # Use environment variable for base directory or default
 CLONE_BASE_DIR = os.getenv("CLONE_BASE_DIR", "./cloned_repos")
@@ -51,7 +50,7 @@ executor = ThreadPoolExecutor(max_workers=2)
 class RepoInput(BaseModel):
     github_url: HttpUrl
 
-    @validator('github_url')
+    @classmethod
     def validate_github_url(cls, v):
         url_str = str(v)
         if not (url_str.startswith("https://github.com/") and
@@ -139,20 +138,19 @@ def analyze_dependencies_with_gemini(requirements_content: str) -> str:
 
     try:
         model = genai.GenerativeModel('gemini-2.0-flash')
-        prompt = f"""Given the following Python dependencies, generate a clean requirements.txt file with:
-1. Deduplicated dependencies
-2. Resolved version conflicts
-3. Only include necessary dependencies
-4. Format as requirements.txt
+        prompt = f"""Given the following Python dependencies, generate a clean requirements.txt file that:
+        1. Deduplicates any repeated dependencies.
+        2. Resolves any version conflicts.
+        3. Only includes necessary dependencies for the project.
+        4. Formats the output strictly as a `requirements.txt` file, without any additional explanations.
 
-Input:
-{requirements_content}
+        Input:
+        {requirements_content}
 
-Output format:
-```requirements.txt
-[cleaned dependencies]
-```"""
-        
+        Output:
+        ```requirements.txt
+        [cleaned dependencies]
+        """
         response = model.generate_content(prompt)
         logger.info(f"Gemini Analysis Response: {response.text}")
         return response.text
@@ -162,34 +160,13 @@ Output format:
 
 def generate_requirements(destination_path: str) -> str:
     if not install_pipreqs():
-        try:
-            setup_file = Path(destination_path) / 'setup.py'
-            pyproject_file = Path(destination_path) / 'pyproject.toml'
-            
-            if setup_file.exists():
-                result = subprocess.run(
-                    [sys.executable, str(setup_file), '--name'],
-                    capture_output=True,
-                    text=True,
-                    cwd=destination_path
-                )
-                if result.returncode == 0:
-                    logger.info("Dependencies extracted from setup.py")
-                    return result.stdout.strip()
-            
-            elif pyproject_file.exists():
-                logger.info("pyproject.toml found, manual parsing would be needed")
-                return "# Please manually check pyproject.toml for dependencies"
-        
-        except Exception as e:
-            logger.error(f"Fallback requirements generation failed: {e}")
-        
+        logger.error("Pipreqs not available")
         return "# Unable to generate requirements automatically"
 
     try:
         requirements_path = os.path.join(destination_path, "requirements.txt")
         result = subprocess.run(
-            ["pipreqs", destination_path, "--force", "--savepath", requirements_path],
+            ["python -m pipreqs", destination_path, "--force", "--savepath", requirements_path],
             capture_output=True,
             text=True,
             timeout=30,
@@ -214,9 +191,15 @@ def generate_requirements(destination_path: str) -> str:
         logger.error(f"Pipreqs generation failed: {e}")
         return f"# Requirements generation error: {str(e)}"
 
-@app.post("/clone-repo/")
-async def clone_repo(input: RepoInput):
-    repo_url = str(input.github_url)
+@app.route("/clone-repo/", methods=["POST"])
+async def clone_repo():
+    try:
+        data = request.get_json()
+        repo_input = RepoInput(github_url=data.get("github_url"))
+    except (ValidationError, ValueError) as e:
+        return jsonify({"error": f"Invalid input: {str(e)}"}), 400
+
+    repo_url = str(repo_input.github_url)
     repo_name = repo_url.split("/")[-1].replace(".git", "")
     unique_folder = f"{repo_name}_{uuid.uuid4().hex[:8]}"
     destination_path = os.path.join(CLONE_BASE_DIR, unique_folder)
@@ -233,15 +216,15 @@ async def clone_repo(input: RepoInput):
         asyncio.create_task(asyncio.to_thread(comprehensive_cleanup, destination_path))
 
         # Return the Gemini response immediately
-        return {"requirements.txt": requirements_content}
+        return jsonify({"requirements.txt": requirements_content})
     
     except Exception as e:
         logger.error(f"Cloning operation failed: {str(e)}")
         # Ensure cleanup runs even if there's an error
         asyncio.create_task(asyncio.to_thread(comprehensive_cleanup, destination_path))
-        raise HTTPException(status_code=400, detail=f"Operation failed: {str(e)}")
+        return jsonify({"error": f"Operation failed: {str(e)}"}), 400
 
 if __name__ == "__main__":
     if not GEMINI_API_KEY:
         print("WARNING: Gemini API key not set. Dependency analysis will be limited.")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    app.run(host="0.0.0.0", port=8000, debug=False)
