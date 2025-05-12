@@ -1,4 +1,8 @@
+
+    
+    
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # Import CORS
 from pydantic import BaseModel, HttpUrl, ValidationError
 from git import Repo
 import os
@@ -12,6 +16,7 @@ import time
 import psutil
 import gc
 import sys
+import ast
 from dotenv import load_dotenv
 import google.generativeai as genai
 import asyncio
@@ -39,6 +44,7 @@ else:
     genai.configure(api_key=GEMINI_API_KEY)
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})  # Allow all origins
 
 # Use environment variable for base directory or default
 CLONE_BASE_DIR = os.getenv("CLONE_BASE_DIR", "./cloned_repos")
@@ -82,7 +88,7 @@ def comprehensive_cleanup(destination_path: str):
                                 open_handles.append((proc.pid, proc.name(), open_file.path))
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
-                
+
                 if open_handles:
                     logger.warning(f"Open handles found: {open_handles}")
                     for pid, _, _ in open_handles:
@@ -96,9 +102,9 @@ def comprehensive_cleanup(destination_path: str):
                     subprocess.run(['taskkill', '/F', '/IM', 'git.exe'],
                                  stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)
-                
+
                 shutil.rmtree(destination_path, ignore_errors=True)
-                
+
                 if os.path.exists(destination_path):
                     for root, dirs, files in os.walk(destination_path, topdown=False):
                         for name in files:
@@ -131,6 +137,32 @@ def install_pipreqs():
             logger.error(f"Failed to install pipreqs: {e}")
             return False
 
+def get_imports_from_file(filepath):
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            tree = ast.parse(f.read(), filename=filepath)
+        imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    imports.add(name.name.split('.')[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imports.add(node.module.split('.')[0])
+        return imports
+    except Exception as e:
+        logger.warning(f"Failed to parse {filepath}: {e}")
+        return set()
+
+def generate_requirements_manual(destination_path: str) -> str:
+    imports = set()
+    for root, _, files in os.walk(destination_path):
+        for file in files:
+            if file.endswith('.py'):
+                filepath = os.path.join(root, file)
+                imports.update(get_imports_from_file(filepath))
+    return '\n'.join(f"{imp}>=0.0.0" for imp in sorted(imports)) or "# No imports detected"
+
 def analyze_dependencies_with_gemini(requirements_content: str) -> str:
     if not GEMINI_API_KEY:
         logger.warning("Gemini API key not set. Returning original requirements.")
@@ -139,7 +171,7 @@ def analyze_dependencies_with_gemini(requirements_content: str) -> str:
     try:
         model = genai.GenerativeModel('gemini-2.0-flash')
         prompt = f"""Given the following Python dependencies, generate a clean requirements.txt file that:
-        1. Deduplicates any repeated dependencies.
+        1. Strictly remove duplicates any repeated dependencies.
         2. Resolves any version conflicts.
         3. Only includes necessary dependencies for the project.
         4. Formats the output strictly as a `requirements.txt` file, without any additional explanations.
@@ -160,36 +192,43 @@ def analyze_dependencies_with_gemini(requirements_content: str) -> str:
 
 def generate_requirements(destination_path: str) -> str:
     if not install_pipreqs():
-        logger.error("Pipreqs not available")
-        return "# Unable to generate requirements automatically"
+        logger.error("Pipreqs not available, falling back to manual parsing")
+        return generate_requirements_manual(destination_path)
 
     try:
         requirements_path = os.path.join(destination_path, "requirements.txt")
         result = subprocess.run(
-            ["python -m pipreqs", destination_path, "--force", "--savepath", requirements_path],
+            ["pipreqs", destination_path, "--force", "--savepath", requirements_path, "--ignore", ".git,tests,docs,build"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
             shell=(platform.system() == "Windows")
         )
 
         if os.path.exists(requirements_path):
-            with open(requirements_path, "r") as f:
+            with open(requirements_path, "r", encoding="utf-8") as f:
                 requirements_content = f.read()
-            
+
             logger.info(f"Requirements generated:\n{requirements_content}")
             gemini_analysis = analyze_dependencies_with_gemini(requirements_content)
             return gemini_analysis
-        
+
         logger.warning(f"Pipreqs output: {result.stdout or result.stderr}")
-        return result.stdout or result.stderr or "# No requirements detected"
-    
+        return generate_requirements_manual(destination_path)
+
     except subprocess.TimeoutExpired:
-        logger.error("Pipreqs generation timed out")
-        return "# Requirements generation timed out"
+        logger.error("Pipreqs generation timed out, falling back to manual parsing")
+        return generate_requirements_manual(destination_path)
+    except UnicodeDecodeError as e:
+        logger.error(f"UnicodeDecodeError in pipreqs: {e}, falling back to manual parsing")
+        return generate_requirements_manual(destination_path)
     except Exception as e:
-        logger.error(f"Pipreqs generation failed: {e}")
-        return f"# Requirements generation error: {str(e)}"
+        logger.error(f"Pipreqs generation failed: {e}, falling back to manual parsing")
+        return generate_requirements_manual(destination_path)
+
+@app.route("/")
+def a():
+    return jsonify({"test": "test"}), 200
 
 @app.route("/clone-repo/", methods=["POST"])
 async def clone_repo():
@@ -217,7 +256,7 @@ async def clone_repo():
 
         # Return the Gemini response immediately
         return jsonify({"requirements.txt": requirements_content})
-    
+
     except Exception as e:
         logger.error(f"Cloning operation failed: {str(e)}")
         # Ensure cleanup runs even if there's an error
@@ -227,4 +266,4 @@ async def clone_repo():
 if __name__ == "__main__":
     if not GEMINI_API_KEY:
         print("WARNING: Gemini API key not set. Dependency analysis will be limited.")
-    app.run(host="0.0.0.0", port=8000, debug=False)
+    app.run(debug=True)

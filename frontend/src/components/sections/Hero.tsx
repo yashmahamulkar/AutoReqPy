@@ -17,7 +17,7 @@ export const Hero = () => {
     setResult("");
 
     try {
-      const response = await fetch("https://pyreqinovact.pythonanywhere.com/clone-repo/", {
+      const response = await fetch("http://127.0.0.1:5000/clone-repo/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
