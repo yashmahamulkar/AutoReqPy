@@ -91,6 +91,6 @@ You can run AutoReqPy directly from the command line without needing to deploy t
 python windows_app.py --local /path/to/project
 
 # Save the output to a file
-python main.py --local /path/to/project > requirements.txt
+python windows_app.py --local /path/to/project > requirements.txt
 
 
