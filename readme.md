@@ -62,7 +62,10 @@
    GEMINI_API_KEY=your_gemini_api_key
    CLONE_BASE_DIR=../cloned_repos
    ```
-
+5. Run Flask server
+```
+python windows_app.py --serve
+```
 ### Frontend Setup
 1. Navigate to the frontend directory:
    ```bash
@@ -72,3 +75,22 @@
    ```bash
    npm install
  
+
+
+# For Private Repos Local 
+1. Clone your private repo
+
+
+
+### 💻 Local Project Analysis (CLI)
+You can run AutoReqPy directly from the command line without needing to deploy the web server.
+
+#### ✅ Example CLI Usage:
+```bash
+# Analyze a local Python project and print requirements
+python windows_app.py --local /path/to/project
+
+# Save the output to a file
+python windows_app.py --local /path/to/project > requirements.txt
+
+
