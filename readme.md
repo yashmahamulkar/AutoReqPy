@@ -77,7 +77,7 @@ python windows_app.py --serve
  
 
 
-#For Private Repos Local 
+# For Private Repos Local 
 1. Clone your private repo
 
 
