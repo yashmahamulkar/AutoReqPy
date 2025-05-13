@@ -1,8 +1,5 @@
-
-    
-    
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # Import CORS
+from flask_cors import CORS
 from pydantic import BaseModel, HttpUrl, ValidationError
 from git import Repo
 import os
@@ -17,6 +14,7 @@ import psutil
 import gc
 import sys
 import ast
+import argparse
 from dotenv import load_dotenv
 import google.generativeai as genai
 import asyncio
@@ -44,13 +42,11 @@ else:
     genai.configure(api_key=GEMINI_API_KEY)
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # Allow all origins
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Use environment variable for base directory or default
 CLONE_BASE_DIR = os.getenv("CLONE_BASE_DIR", "./cloned_repos")
 Path(CLONE_BASE_DIR).mkdir(parents=True, exist_ok=True)
 
-# Initialize ThreadPoolExecutor for background tasks
 executor = ThreadPoolExecutor(max_workers=2)
 
 class RepoInput(BaseModel):
@@ -100,8 +96,8 @@ def comprehensive_cleanup(destination_path: str):
 
                 if platform.system() == "Windows":
                     subprocess.run(['taskkill', '/F', '/IM', 'git.exe'],
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
 
                 shutil.rmtree(destination_path, ignore_errors=True)
 
@@ -251,19 +247,44 @@ async def clone_repo():
         # Generate requirements
         requirements_content = generate_requirements(destination_path)
 
-        # Schedule cleanup in the background
+        # Schedule cleanup
         asyncio.create_task(asyncio.to_thread(comprehensive_cleanup, destination_path))
 
-        # Return the Gemini response immediately
         return jsonify({"requirements.txt": requirements_content})
 
     except Exception as e:
         logger.error(f"Cloning operation failed: {str(e)}")
-        # Ensure cleanup runs even if there's an error
         asyncio.create_task(asyncio.to_thread(comprehensive_cleanup, destination_path))
         return jsonify({"error": f"Operation failed: {str(e)}"}), 400
 
+def process_local_repo(local_path: str):
+    if not os.path.isdir(local_path):
+        logger.error(f"Provided path is not a valid directory: {local_path}")
+        print(f"Error: {local_path} is not a valid directory.")
+        return
+
+    logger.info(f"Processing local repository at: {local_path}")
+    try:
+        requirements_content = generate_requirements(local_path)
+        print("\nGenerated requirements.txt:\n")
+        print(requirements_content)
+    except Exception as e:
+        logger.error(f"Failed to process local repository: {str(e)}")
+        print(f"Error: {str(e)}")
+
 if __name__ == "__main__":
-    if not GEMINI_API_KEY:
-        print("WARNING: Gemini API key not set. Dependency analysis will be limited.")
-    app.run(debug=True)
+    parser = argparse.ArgumentParser(description="Dependency extractor for GitHub and local repositories")
+    parser.add_argument('--local', type=str, help='Path to local Python project directory')
+    parser.add_argument('--serve', action='store_true', help='Run the Flask server')
+    args = parser.parse_args()
+
+    if args.local:
+        if not GEMINI_API_KEY:
+            print("WARNING: Gemini API key not set. Output will be raw without cleanup.")
+        process_local_repo(args.local)
+    elif args.serve:
+        if not GEMINI_API_KEY:
+            print("WARNING: Gemini API key not set. Dependency analysis will be limited.")
+        app.run(debug=True)
+    else:
+        parser.print_help()
